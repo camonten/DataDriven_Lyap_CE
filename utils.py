@@ -1,409 +1,409 @@
 """
-This file defines utilities needed for the experiments and plotting, such as
-neural network related functions, and formatting for results postprocessing.
+Utilities for experiments and plotting (neural network functions, result formatting).
 
-
-Authors: Carlos A. Montenegro, Hybrid Systems Laboratory, UC Santa Cruz
-         (GitHub: camonten)
-
-         Santiago Jimenez Leudo, Hybrid Systems Laboratory, UC Santa Cruz
-         (Github: sjleudo)
+Authors: Carlos A. Montenegro (Hybrid Systems Laboratory, UC Santa Cruz, GitHub: camonten)
+         Santiago Jimenez Leudo (Hybrid Systems Laboratory, UC Santa Cruz, GitHub: sjleudo)
 """
 
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
-
-import jax.random as jrandom
 import jax
-import jax.nn as jnn
 import jax.numpy as jnp
+import jax.nn as jnn
+import jax.random as jrandom
 from jax.example_libraries import optimizers
 from jax.flatten_util import ravel_pytree
-from functools import partial
-
+from functools import partial, reduce
 from math import sqrt
 import matplotlib
-
 from matplotlib.ticker import ScalarFormatter
 
 
 class ScalarFormatterClass(ScalarFormatter):
-    def _set_format(self):
+    def _set_format(self) -> None:
+        """Set the scalar format to two decimal places."""
         self.format = "%1.2f"
 
 
-def latexify(fig_width=None, fig_height=None, columns=1):
-    """Set up matplotlib's RC params for LaTeX plotting.
-    Call this before plotting a figure.
-
-    Parameters
-    ----------
-    fig_width : float, optional, inches
-    fig_height : float,  optional, inches
-    columns : {1, 2}
+def latexify(
+    fig_width: Optional[float] = None,
+    fig_height: Optional[float] = None,
+    columns: int = 1,
+) -> None:
     """
+    Configure matplotlib's RC parameters for LaTeX plotting.
 
-    # code adapted from http://www.scipy.org/Cookbook/Matplotlib/LaTeX_Examples
+    Parameters:
+        fig_width (Optional[float]): Figure width in inches. Defaults based on number of columns.
+        fig_height (Optional[float]): Figure height in inches. Defaults to the golden ratio times width.
+        columns (int): Number of columns (1 or 2).
 
-    # Width and max height in inches for IEEE journals taken from
-    # computer.org/cms/Computer.org/Journal%20templates/transactions_art_guide.pdf
-
+    Notes:
+        Warns if the computed fig_height exceeds the maximum allowed.
+    """
     assert columns in [1, 2]
-
-    if fig_width is None:
-        fig_width = 3.39 if columns == 1 else 6.9  # width in inches
-
-    if fig_height is None:
-        golden_mean = (sqrt(5) - 1.0) / 2.0  # Aesthetic ratio
-        fig_height = fig_width * golden_mean  # height in inches
-
-    MAX_HEIGHT_INCHES = 8.0
-    if fig_height > MAX_HEIGHT_INCHES:
+    fig_width = fig_width or (3.39 if columns == 1 else 6.9)
+    fig_height = fig_height or (fig_width * ((sqrt(5) - 1) / 2))
+    if fig_height > 8.0:
         print(
-            "WARNING: fig_height too large:"
-            + fig_height
-            + "so will reduce to"
-            + MAX_HEIGHT_INCHES
-            + "inches."
+            f"WARNING: fig_height too large: {fig_height} so will reduce to 8.0 inches."
         )
-        fig_height = MAX_HEIGHT_INCHES
-
-    # NB (bart): default font-size in latex is 11. This should exactly match
-    # the font size in the text if the figwidth is set appropriately.
-    # Note that this does not hold if you put two figures next to each other using
-    # minipage. You need to use subplots.
-    params = {
-        # "backend": "ps",
-        "text.latex.preamble": "\n".join(
-            [
-                r"\usepackage{gensymb}",
-                r"\usepackage{amsfonts}",
-            ]
-        ),
-        "axes.labelsize": 12,  # fontsize for x and y labels (was 12 and before 10)
-        "axes.titlesize": 12,
-        "font.size": 12,  # was 12 and before 10
-        "legend.fontsize": 12,  # was 12 and before 10
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
-        "text.usetex": True,
-        "figure.figsize": [fig_width, fig_height],
-        "font.family": "serif",
-    }
-
-    matplotlib.rcParams.update(params)
+        fig_height = 8.0
+    matplotlib.rcParams.update(
+        {
+            "text.latex.preamble": "\n".join(
+                [r"\usepackage{gensymb}", r"\usepackage{amsfonts}"]
+            ),
+            "axes.labelsize": 12,
+            "axes.titlesize": 12,
+            "font.size": 12,
+            "legend.fontsize": 12,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "text.usetex": True,
+            "figure.figsize": [fig_width, fig_height],
+            "font.family": "serif",
+        }
+    )
 
 
-# def combinations(arrays):
-#     """Return a single array with combinations of parameters.
+def hausdorff_distance(S: np.ndarray, C: np.ndarray) -> float:
+    """
+    Compute the directed Hausdorff distance from set S to set C:
+        d_H(S, C) = sup_{s in S} inf_{c in C} ||s - c||.
 
-#     Parameters
-#     ----------
-#     arrays: list of np.array
+    Parameters:
+        S (np.ndarray): Array of shape (N, d) for set S.
+        C (np.ndarray): Array of shape (M, d) for the covering centers.
 
-#     Returns
-#     -------
-#     array - np.array
-#         An array that contains all combinations of the input arrays
-#     """
-#     return np.array(np.meshgrid(*arrays)).T.reshape(-1, len(arrays))
-
-
-""" NEURAL NET RELATED """
+    Returns:
+        float: The Hausdorff distance from S to C.
+    """
+    # Compute all pairwise distances (N x M)
+    dists = np.linalg.norm(S[:, None, :] - C[None, :, :], axis=2)
+    return np.max(np.min(dists, axis=1))
 
 
 class NeuralNet:
     def __init__(
         self,
-        net_dims,
-        args,
-        dyn,
-        opt_name,
-        act_fun,
-        ell_C=None,
-        ell_D=None,
-        opt_kwargs={},
-    ):
-        """Constructor for neural network class used to approximate Lyapunov functions.
-
-        Args:
-            net_dims: dimensions of layers in neural network.
-            args: NamedTuple containing the hyperparameters used for training.
-            dyn: hybrid dynamcs with flow and jump maps.
-            opt_name: name of the optimizer, choose between: "Adam", "Adagrad", "Nesterov", "GD", "SGD"
-            act_fun: activation function for the NN. JAX function either jnp or jax.nn is accepted
-            ell_C: stage cost for flows. Defaults to None.
-            ell_D: stage cost for jumps. Defaults to None.
-            opt_kwargs: optimizer arguments. Defaults to {}.
+        net_dims: List[int],
+        args: Any,
+        dyn: Any,
+        opt_name: str,
+        act_fun: Callable[[jnp.ndarray], jnp.ndarray],
+        ell_C: Optional[Callable[[jnp.ndarray], float]] = None,
+        ell_D: Optional[Callable[[jnp.ndarray], float]] = None,
+        opt_kwargs: Dict[str, Any] = {},
+    ) -> None:
         """
-        self.args = args
-        self.opt_name = opt_name
+        Initialize the NeuralNet with architecture, dynamics, optimizer, and activation function.
+
+        Parameters:
+            net_dims (List[int]): List of layer dimensions.
+            args (Any): Hyperparameters and training settings.
+            dyn (Any): Hybrid dynamics with flow and jump maps.
+            opt_name (str): Optimizer name ('Adam', 'Adagrad', 'Nesterov', 'SGD', etc.).
+            act_fun (Callable[[jnp.ndarray], jnp.ndarray]): Activation function (e.g., jax.nn.relu).
+            ell_C (Optional[Callable[[jnp.ndarray], float]]): Cost function for flows (optional).
+            ell_D (Optional[Callable[[jnp.ndarray], float]]): Cost function for jumps (optional).
+            opt_kwargs (Dict[str, Any]): Additional keyword arguments for optimizer initialization.
+        """
+        self.args, self.opt_name, self.net_dims, self.act_fun = (
+            args,
+            opt_name,
+            net_dims,
+            act_fun,
+        )
         self._init_optimizer(opt_kwargs)
-        self.net_dims = net_dims
-        self.act_fun = act_fun
-
         self.key = jrandom.PRNGKey(5433)
-
-        # self.forward is a function that passes a batch of data through the NN
         self.forward = jax.vmap(self.forward_indiv, in_axes=(0, None))
+        print(
+            "Training for practical pAS!"
+            if (ell_C is None and ell_D is None)
+            else "Training for cost upper bound!"
+        )
+        self.ell_C, self.ell_D, self.dyn = ell_C, ell_D, dyn
+        self.lam_C, self.lam_D, self.mu = args.lam_C, args.lam_D, args.mu
 
-        # stage costs
-        if ell_C is None and ell_D is None:
-            print("Training for practical pAS!")
-        else:
-            print("Training for cost upper bound!")
-        self.ell_C = ell_C
-        self.ell_D = ell_D
+    def __call__(self, x: jnp.ndarray, params: Any) -> jnp.ndarray:
+        """
+        Perform a forward pass through the network.
 
-        # hybrid dynamics
-        self.dyn = dyn
+        Parameters:
+            x (jnp.ndarray): Input data.
+            params (Any): Neural network parameters.
 
-        # Lagrange multipliers estimates for training
-        self.lam_C, self.lam_D = args.lam_C, args.lam_D
-        # penalty parameter
-        self.mu = args.mu
-
-    def __call__(self, x, params):
-        """PyTorch-like calling of class-based neural network forward method."""
-
+        Returns:
+            jnp.ndarray: Network output for the given input.
+        """
         return self.forward(x, params)
 
     @partial(jax.jit, static_argnums=0)
-    def step(self, epoch, opt_state, dataset):
-        """Do one step of optimization based on self.loss.
-
-        Args:
-            epoch: Currrent step of training.
-            opt_state: Current state of network parameters.
-            dataset: Training dataset.
-        Returns:
-            opt_state of NN parameters after this optimization step.
+    def step(self, epoch: int, opt_state: Any, dataset: Dict[str, jnp.ndarray]) -> Any:
         """
+        Perform one optimization step.
 
-        params = self.get_params(opt_state)
-        grads = jax.grad(self.loss, argnums=0)(params, dataset)
+        Parameters:
+            epoch (int): Current training epoch.
+            opt_state (Any): Current optimizer state containing network parameters.
+            dataset (Dict[str, jnp.ndarray]): Training dataset.
 
+        Returns:
+            Any: Updated optimizer state after one step.
+        """
+        p = self.get_params(opt_state)
+        grads = jax.grad(self.loss, argnums=0)(p, dataset)
         return self.opt_update(epoch, grads, opt_state)
 
     @partial(jax.jit, static_argnums=0)
-    def loss(self, params, dataset):
-        loss, _ = self.loss_and_constraints(params, dataset)
-        return loss
-
-    @partial(jax.jit, static_argnums=0)
-    def constraints(self, params, dataset):
-        _, constraints = self.loss_and_constraints(params, dataset)
-        return constraints
-
-    @partial(jax.jit, static_argnums=0)
-    def loss_and_constraints(self, params, dataset):
-        """Calculate loss for training neural network subject to Lyapunov constraints.
-
-        Args:
-            dataset: Training dataset.
-            params: Trainable parameters of the neural network.
-        Returns:
-            Value of the loss function.
+    def loss(self, params: Any, dataset: Dict[str, jnp.ndarray]) -> jnp.ndarray:
         """
+        Compute the loss for the given parameters and dataset.
 
-        def forward_grad(x):
-            return jax.vmap(self.model_grad_indiv, in_axes=(0, None))(x, params)
+        Parameters:
+            params (Any): Neural network parameters.
+            dataset (Dict[str, jnp.ndarray]): Training dataset.
 
-        def flows_constraint(x, params):
-            return jax.vmap(self.flows_constraint_indiv, in_axes=(0, None))(x, params)
+        Returns:
+            jnp.ndarray: Computed loss value.
+        """
+        return self.loss_and_constraints(params, dataset)[0]
 
-        def jumps_constraint(x, params):
-            return jax.vmap(self.jumps_constraint_indiv, in_axes=(0, None))(x, params)
+    @partial(jax.jit, static_argnums=0)
+    def constraints(
+        self, params: Any, dataset: Dict[str, jnp.ndarray]
+    ) -> Dict[str, jnp.ndarray]:
+        """
+        Compute the constraint percentages for flows and jumps.
 
-        def penalty(vect):
-            return jnp.sum(jnn.relu(vect) ** 2)
+        Parameters:
+            params (Any): Neural network parameters.
+            dataset (Dict[str, jnp.ndarray]): Training dataset.
 
-        def constraint_pct(vect):
-            frac_incorrect = jnp.sum(jnp.heaviside(vect, 0)) / vect.shape[0]
-            return (1.0 - frac_incorrect) * 100.0
+        Returns:
+            Dict[str, jnp.ndarray]: Dictionary with percentages for 'flows' and 'jumps' constraints.
+        """
+        return self.loss_and_constraints(params, dataset)[1]
 
-        """ Augmented Lagrangian """
-        # penalize large Lipschitz constants of the NN
-        param_loss = jnp.sum(jnp.linalg.norm(ravel_pytree(params)[0]))
+    @partial(jax.jit, static_argnums=0)
+    def loss_and_constraints(
+        self, params: Any, dataset: Dict[str, jnp.ndarray]
+    ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
+        """
+        Compute the augmented Lagrangian loss and constraint percentages.
 
-        # enforce Lyapunov decrease condition along flows
-        flows_consts = flows_constraint(dataset["x_flows"], params) + self.args.gam_C
-        flows_loss = penalty(flows_consts)
-        flows_const_pct = constraint_pct(flows_consts)
+        Parameters:
+            params (Any): Neural network parameters.
+            dataset (Dict[str, jnp.ndarray]): Training dataset.
 
-        # enforce Lyapunov decrease condition along jumps
-        jumps_consts = jumps_constraint(dataset["x_jumps"], params) + self.args.gam_D
-        jumps_loss = penalty(jumps_consts)
-        jumps_const_pct = constraint_pct(jumps_consts)
-
-        # Goal: make all derivatives small
-        x_all = jnp.vstack(
-            (
-                dataset["x_flows"],
-                dataset["x_jumps"],
-            )
+        Returns:
+            Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
+                A tuple (loss, constraints) where:
+                  - loss is the computed loss value.
+                  - constraints is a dict with 'flows' and 'jumps' constraint percentages.
+        """
+        fgrad = lambda x: jax.vmap(self.model_grad_indiv, in_axes=(0, None))(x, params)
+        fcons = lambda x: jax.vmap(self.flows_constraint_indiv, in_axes=(0, None))(
+            x, params
         )
-        dV_loss = jnp.sum(jnp.linalg.norm(forward_grad(x_all)))
+        jcons = lambda x: jax.vmap(self.jumps_constraint_indiv, in_axes=(0, None))(
+            x, params
+        )
+        penalty = lambda v: jnp.sum(jnn.relu(v) ** 2)
+        constraint_pct = (
+            lambda v: (1 - jnp.sum(jnp.heaviside(v, 0)) / v.shape[0]) * 100.0
+        )
 
-        # calculate slack variables
-        s_flows = jnn.relu(-flows_consts - self.mu * self.lam_C)
-        s_jumps = jnn.relu(-jumps_consts - self.mu * self.lam_D)
-
-        # compute the augmented Lagrangian
+        param_loss = jnp.sum(jnp.linalg.norm(ravel_pytree(params)[0]))
+        flows = fcons(dataset["x_flows"]) + self.args.gam_C
+        jumps = jcons(dataset["x_jumps"]) + self.args.gam_D
+        dV_loss = jnp.sum(
+            jnp.linalg.norm(fgrad(jnp.vstack((dataset["x_flows"], dataset["x_jumps"]))))
+        )
+        s_flows = jnn.relu(-flows - self.mu * self.lam_C)
+        s_jumps = jnn.relu(-jumps - self.mu * self.lam_D)
         loss = (
             self.args.lam_grad * dV_loss
             + self.args.lam_param * param_loss
-            - jnp.sum(self.lam_C * (-flows_consts - s_flows))
-            - jnp.sum(self.lam_D * (-jumps_consts - s_jumps))
+            - jnp.sum(self.lam_C * (-flows - s_flows))
+            - jnp.sum(self.lam_D * (-jumps - s_jumps))
             + 1
             / (2 * self.mu)
-            * (
-                jnp.sum((-flows_consts - s_flows) ** 2)
-                + jnp.sum((-jumps_consts - s_jumps) ** 2)
-            )
+            * (jnp.sum((-flows - s_flows) ** 2) + jnp.sum((-jumps - s_jumps) ** 2))
+        )
+        return loss, {"flows": constraint_pct(flows), "jumps": constraint_pct(jumps)}
+
+    def flows_constraint_indiv(self, x: jnp.ndarray, params: Any) -> jnp.ndarray:
+        """
+        Compute the Lyapunov flows constraint for a single input.
+
+        Parameters:
+            x (jnp.ndarray): Input data point.
+            params (Any): Neural network parameters.
+
+        Returns:
+            jnp.ndarray: Computed flow constraint value.
+        """
+        return jnp.dot(self.dyn.f(x), self.model_grad_indiv(x, params)) + (
+            self.ell_C(x) if self.ell_C is not None else 0
         )
 
-        all_consts = {
-            "flows": flows_const_pct,
-            "jumps": jumps_const_pct,
-        }
+    def jumps_constraint_indiv(self, x: jnp.ndarray, params: Any) -> jnp.ndarray:
+        """
+        Compute the Lyapunov jumps constraint for a single input.
 
-        return loss, all_consts
+        Parameters:
+            x (jnp.ndarray): Input data point.
+            params (Any): Neural network parameters.
 
-    def flows_constraint_indiv(self, x, params):
-        dV = self.model_grad_indiv(x, params)
+        Returns:
+            jnp.ndarray: Computed jump constraint value.
+        """
+        return (
+            self.forward_indiv(self.dyn.g(x), params, self.act_fun)
+            - self.forward_indiv(x, params, self.act_fun)
+            + (self.ell_D(x) if self.ell_D is not None else 0)
+        )
 
-        term1 = jnp.dot(self.dyn.f(x), dV)
-        term2 = self.ell_C(x) if self.ell_C is not None else 0
+    def model_grad_indiv(self, x: jnp.ndarray, params: Any) -> jnp.ndarray:
+        """
+        Compute the gradient of the forward pass with respect to the input for a single instance.
 
-        return term1 + term2
+        Parameters:
+            x (jnp.ndarray): Input data point.
+            params (Any): Neural network parameters.
 
-    def jumps_constraint_indiv(self, x, params):
-        term1 = self.forward_indiv(
-            self.dyn.g(x), params, self.act_fun
-        ) - self.forward_indiv(x, params, self.act_fun)
-        term2 = self.ell_D(x) if self.ell_D is not None else 0
-
-        return term1 + term2
-
-    def model_grad_indiv(self, x, params):
+        Returns:
+            jnp.ndarray: Gradient of the network output with respect to the input.
+        """
         return jax.grad(self.forward_indiv)(x, params, self.act_fun)
 
     @staticmethod
-    def forward_indiv(x: jnp.ndarray, params: list, act_fun: jax.nn, eps: float = 0.1):
-        """Forward pass through the neural network for a single instance.
-
-        Args:
-            x: Single instance to input into NN.
-            params: Trainable parameters of neural network.
-        Returns:
-            Output from passing instance through neural network.
+    def forward_indiv(
+        x: jnp.ndarray,
+        params: List[Any],
+        act_fun: Callable[[jnp.ndarray], jnp.ndarray],
+        eps: float = 0.1,
+    ) -> jnp.ndarray:
         """
+        Compute the forward pass through the neural network for a single instance.
 
-        activations = x
-        for G1, G2 in params:
-            weight = jnp.hstack((G1.T @ G1 + eps * jnp.eye(G1.shape[1]), G2))
-            outputs = activations.dot(weight)
-            activations = act_fun(outputs)
+        Parameters:
+            x (jnp.ndarray): Input vector.
+            params (List[Any]): List of layer parameters.
+            act_fun (Callable[[jnp.ndarray], jnp.ndarray]): Activation function.
+            eps (float): Small constant for numerical stability.
 
-        out = jnp.linalg.norm(activations)
-
-        return jnp.squeeze(out)
+        Returns:
+            jnp.ndarray: Scalar output of the network.
+        """
+        activations = reduce(
+            lambda a, p: act_fun(
+                a.dot(jnp.hstack((p[0].T @ p[0] + eps * jnp.eye(p[0].shape[1]), p[1])))
+            ),
+            params,
+            x,
+        )
+        return jnp.squeeze(jnp.linalg.norm(activations))
 
     @staticmethod
-    def random_layer_params(m: int, n: int, key):
-        """Randomly intialize a weight matrix and bias vector.
-
-        Args:
-            m, n: Dimensions of weight matrix.
-            key: Jax random number generator.
-            scale: Scale of random initialization.
-        Returns:
-            weight: Randomly initialized weight matrix.
-            bias: Randomly initialized bias vector.
+    def random_layer_params(
+        m: int, n: int, key: jax.random.KeyArray
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
+        Randomly initialize parameters for a neural network layer.
 
+        Parameters:
+            m (int): Input dimension.
+            n (int): Output dimension.
+            key (jax.random.KeyArray): JAX random number generator key.
+
+        Returns:
+            Tuple[jnp.ndarray, jnp.ndarray]: A tuple containing a randomly initialized weight matrix and bias vector.
+        """
         q = int(np.ceil(0.5 * (m + 1)))
-
         w_key, b_key = jrandom.split(key)
+        return jrandom.normal(w_key, (q, m)), jrandom.normal(b_key, (m, n - m))
 
-        G1 = jrandom.normal(w_key, (q, m))
-        G2 = jrandom.normal(b_key, (m, (n - m)))
+    def init_params(
+        self, verbose: bool = False
+    ) -> List[Tuple[jnp.ndarray, jnp.ndarray]]:
+        """
+        Initialize the neural network parameters randomly.
 
-        return G1, G2
+        Parameters:
+            verbose (bool): If True, prints parameter shapes.
 
-    def init_params(self, verbose=False):
-        """Intialize the parameters of the neural network with random values."""
-
+        Returns:
+            List[Tuple[jnp.ndarray, jnp.ndarray]]: List of randomly initialized parameters for each layer.
+        """
         if not np.all(np.diff(self.net_dims) >= 0):
             raise ValueError(
                 "Each layer must maintain or increase the dimension of its input!"
             )
-
         keys = jrandom.split(self.key, len(self.net_dims))
-        dimensions = zip(self.net_dims[:-1], self.net_dims[1:], keys)
-        params = [self.random_layer_params(m, n, k) for (m, n, k) in dimensions]
-
-        if verbose is True:
-            print(f"Param shapes are: {[(p1.shape, p2.shape) for (p1, p2) in params]}")
-
+        params = [
+            self.random_layer_params(m, n, k)
+            for m, n, k in zip(self.net_dims[:-1], self.net_dims[1:], keys)
+        ]
+        if verbose:
+            print(f"Param shapes are: {[(p1.shape, p2.shape) for p1, p2 in params]}")
         return params
 
-    def _init_optimizer(self, kwargs):
-        if self.opt_name == "SGD":
-            self.opt_init, self.opt_update, self.get_params = optimizers.sgd(**kwargs)
-
-        elif self.opt_name == "Adam":
-            self.opt_init, self.opt_update, self.get_params = optimizers.adam(**kwargs)
-
-        elif self.opt_name == "Adagrad":
-            (
-                self.opt_init,
-                self.opt_update,
-                self.get_params,
-            ) = optimizers.adagrad(**kwargs)
-
-        elif self.opt_name == "Nesterov":
-            (
-                self.opt_init,
-                self.opt_update,
-                self.get_params,
-            ) = optimizers.nesterov(**kwargs)
-
-        else:
-            opts = ["Adam", "Adagrad", "Nesterov", "GD", "SGD"]
-            raise NotImplementedError(f'Supported optimizers: {" | ".join(opts)}')
-
-
-class AverageMeter(object):
-    def __init__(self, name, fmt=":f"):
-        """Computes and stores the average and current value.
-
-        Params:
-            name: Name of variable that we are keeping track of.
-            fmt: Format for printing data.
+    def _init_optimizer(self, kwargs: Dict[str, Any]) -> None:
         """
+        Initialize the optimizer based on the chosen optimization algorithm.
 
-        self.name = name
-        self.fmt = fmt
+        Parameters:
+            kwargs (Dict[str, Any]): Keyword arguments for the optimizer.
+
+        Raises:
+            NotImplementedError: If the provided optimizer name is not supported.
+        """
+        opts: Dict[str, Callable[..., Any]] = {
+            "SGD": optimizers.sgd,
+            "Adam": optimizers.adam,
+            "Adagrad": optimizers.adagrad,
+            "Nesterov": optimizers.nesterov,
+        }
+        if self.opt_name in opts:
+            self.opt_init, self.opt_update, self.get_params = opts[self.opt_name](
+                **kwargs
+            )
+        else:
+            raise NotImplementedError(
+                f'Supported optimizers: {" | ".join(opts.keys())}'
+            )
+
+
+class AverageMeter:
+    """
+    Class for tracking and updating average values of a metric.
+    """
+
+    def __init__(self, name: str, fmt: str = ":f") -> None:
+        """
+        Initialize an AverageMeter.
+
+        Parameters:
+            name (str): Name of the metric.
+            fmt (str): Format string for printing the metric.
+        """
+        self.name, self.fmt = name, fmt
         self.reset()
 
-    def reset(self):
-        """Reset all of the intermediate values and averages."""
+    def reset(self) -> None:
+        """Reset the meter's current value, sum, count, and average."""
+        self.val = self.avg = self.sum = self.count = 0
 
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        """Update average value.
-
-        Params:
-            val: Value being appended.
-            n: Number of items that were used to compute val.
+    def update(self, val: float, n: int = 1) -> None:
         """
+        Update the meter with a new value.
 
-        self.val = val
-        self.sum += val * n
-        self.count += n
+        Parameters:
+            val (float): New value to update.
+            n (int): Weight of the new value (default is 1).
+        """
+        self.val, self.sum, self.count = val, self.sum + val * n, self.count + n
         self.avg = self.sum / self.count
